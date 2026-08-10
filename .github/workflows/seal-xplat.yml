@@ -1,0 +1,127 @@
+name: Seal Cross-Platform Build and Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  module-zip:
+    name: Build Go module zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Restore pristine repo metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/upstream.tar.gz https://github.com/containerd/containerd/archive/refs/tags/v2.1.4.tar.gz
+          tar -xzf /tmp/upstream.tar.gz -C /tmp
+          rm -rf .github
+          cp -r /tmp/containerd-2.1.4/.github .github
+          cp /tmp/containerd-2.1.4/.gitignore .gitignore
+          test ! -e .github/workflows/seal-xplat.yml
+          test -e .github/workflows/ci.yml
+
+      - name: Build module zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/helper
+          cd /tmp/helper
+          go mod init helper
+          go get golang.org/x/mod@v0.24.0
+          cat > /tmp/helper/create_mod.go <<'EOF'
+          package main
+
+          import (
+              "log"
+              "os"
+
+              "golang.org/x/mod/module"
+              "golang.org/x/mod/zip"
+          )
+
+          func main() {
+              v := module.Version{Path: "github.com/containerd/containerd/v2", Version: "v2.1.4"}
+              f, err := os.Create(os.Args[2])
+              if err != nil {
+                  log.Fatal(err)
+              }
+              defer f.Close()
+              if err := zip.CreateFromDir(f, v, os.Args[1]); err != nil {
+                  log.Fatal(err)
+              }
+          }
+          EOF
+          go run /tmp/helper/create_mod.go "$GITHUB_WORKSPACE" /tmp/v2.1.4.zip
+          ls -l /tmp/v2.1.4.zip
+
+      - name: Upload module zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: /tmp/v2.1.4.zip
+          if-no-files-found: error
+
+  test:
+    name: Test on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libbtrfs-dev libseccomp-dev pkg-config
+
+      - name: Run tests
+        shell: bash
+        env:
+          GOFLAGS: -mod=vendor
+        run: |
+          set -euo pipefail
+          ALL=$(go list ./...)
+          PKGS=$(printf '%s\n' "$ALL" | grep -Ev '/integration|/cmd/|/contrib/|plugins/snapshots/btrfs|plugins/snapshots/devmapper|plugins/snapshots/blockfile|core/snapshots/testsuite|plugins/snapshots/overlay/overlayutils')
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PKGS=$(printf '%s\n' "$PKGS" | grep -Ev 'plugins/snapshots/windows')
+          fi
+          MANDATORY="github.com/containerd/containerd/v2/internal/cri/labels
+          github.com/containerd/containerd/v2/internal/cri/util
+          github.com/containerd/containerd/v2/internal/cri/server
+          github.com/containerd/containerd/v2/pkg/oci
+          github.com/containerd/containerd/v2/pkg/labels
+          github.com/containerd/containerd/v2/client
+          github.com/containerd/containerd/v2/core/mount"
+          while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            if printf '%s\n' "$ALL" | grep -Fxq "$pkg"; then
+              if ! printf '%s\n' "$PKGS" | grep -Fxq "$pkg"; then
+                echo "ERROR: mandatory-coverage package '$pkg' was filtered out of the test list"
+                exit 1
+              fi
+            fi
+          done <<< "$MANDATORY"
+          echo "$PKGS" | wc -l
+          go test -short -timeout 20m $PKGS
