@@ -75,11 +75,14 @@ jobs:
           if-no-files-found: error
 
   test:
-    name: Test on ${{ matrix.os }}
+    name: Test on ${{ matrix.os }} (go ${{ matrix.go-version }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Mirrors upstream ci.yml for v2.1.4: both toolchain lines (the go.mod
+        # floor 1.23 and 1.24) on every OS, plus the Linux arm64 leg.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        go-version: ['1.23.11', '1.24.5']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     steps:
@@ -89,7 +92,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '${{ matrix.go-version }}'
           cache: false
 
       - name: Install Linux deps
