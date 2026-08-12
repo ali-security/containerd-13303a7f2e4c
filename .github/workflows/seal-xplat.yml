@@ -74,6 +74,60 @@ jobs:
           path: /tmp/v2.1.4.zip
           if-no-files-found: error
 
+  # End-to-end coverage for the three checkpoint CVEs (50195 / 53492 / 53489),
+  # whose fixes all live on the CRImportCheckpoint restore path and cannot be
+  # reached by unit tests. Mirrors the criu/critools/checkpoint steps of
+  # upstream ci.yml's integration-linux job, which runs on a hosted ubuntu
+  # runner just like this one.
+  checkpoint-restore:
+    name: Checkpoint/Restore via CRI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TEST_RUNTIME: io.containerd.runc.v2
+      CGROUP_DRIVER: cgroupfs
+      RUNC_FLAVOR: runc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.5'
+          cache: false
+
+      - name: Install containerd dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gperf dmsetup strace xfsprogs
+          script/setup/install-seccomp
+          script/setup/install-runc
+          script/setup/install-cni $(grep containernetworking/plugins go.mod | awk '{print $2}')
+          script/setup/install-critools
+
+      - name: Install criu
+        run: |
+          set -euo pipefail
+          sudo add-apt-repository -y ppa:criu/ppa
+          sudo apt-get update
+          sudo apt-get install -y criu
+          criu --version
+
+      - name: Install containerd
+        env:
+          CGO_ENABLED: 1
+        run: |
+          set -euo pipefail
+          make binaries GO_BUILD_FLAGS="-mod=vendor"
+          sudo -E PATH=$PATH make install
+
+      - name: Checkpoint/Restore via CRI
+        run: |
+          set -euo pipefail
+          sudo -E PATH=$PATH ./contrib/checkpoint/checkpoint-restore-cri-test.sh
+
   test:
     name: Test on ${{ matrix.os }} (go ${{ matrix.go-version }})
     strategy:
