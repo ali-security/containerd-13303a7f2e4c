@@ -126,7 +126,14 @@ jobs:
       - name: Checkpoint/Restore via CRI
         run: |
           set -euo pipefail
-          sudo -E PATH=$PATH ./contrib/checkpoint/checkpoint-restore-cri-test.sh
+          # The test puts containerd's socket under the checked-out tree, and
+          # containerd appends ".ttrpc" to it. This fork's repo name is long
+          # enough that the resulting path passes the 108-byte unix socket
+          # limit (upstream's own /home/runner/work/containerd/containerd fits),
+          # so run the test through a short symlink to the workspace.
+          sudo ln -sfn "$GITHUB_WORKSPACE" /c
+          cd /c/contrib/checkpoint
+          sudo -E PATH=$PATH ./checkpoint-restore-cri-test.sh
 
   test:
     name: Test on ${{ matrix.os }} (go ${{ matrix.go-version }})
