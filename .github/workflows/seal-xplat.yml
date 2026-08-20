@@ -135,6 +135,67 @@ jobs:
           cd /c/contrib/checkpoint
           sudo -E PATH=$PATH ./checkpoint-restore-cri-test.sh
 
+  # CVE-2024-25621 tightens containerd's state directories to 0o700 while
+  # deliberately leaving /run/containerd and the v2 task dir at 0o711, because
+  # userns-remapped containers need the traversal bit. Nothing else in this
+  # workflow runs the daemon under a user namespace, so this leg — a copy of
+  # upstream ci.yml's tests-cri-in-userns job — is what would catch a regression
+  # in that split. Unlike upstream's fuzz job it carries no repository gate, so
+  # it runs on this fork unchanged.
+  cri-in-userns:
+    name: CRI-in-UserNS (${{ matrix.cgroup_driver }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        cgroup_driver: [cgroupfs, systemd]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up cgroup v2 delegation
+        run: |
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          cat <<EOF | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+          [Service]
+          Delegate=cpu cpuset io memory pids
+          EOF
+          sudo systemctl daemon-reload
+
+      - name: Build cri-in-userns image
+        env:
+          CGROUP_DRIVER: ${{ matrix.cgroup_driver }}
+        run: |
+          set -euo pipefail
+          if [ "$CGROUP_DRIVER" = "systemd" ]; then
+            podman build --target cri-in-userns-systemd -t cri-in-userns-systemd -f ./contrib/Dockerfile.test .
+          else
+            podman build --target cri-in-userns -t cri-in-userns -f ./contrib/Dockerfile.test .
+          fi
+
+      - name: Run cri-in-userns image
+        env:
+          CGROUP_DRIVER: ${{ matrix.cgroup_driver }}
+        # Rootless Podman, as upstream does: the daemon under test runs inside a
+        # user namespace, which is the configuration CVE-2024-25621's permission
+        # split has to keep working.
+        run: |
+          if [ "$CGROUP_DRIVER" = "systemd" ]; then
+            set +e
+            touch ./critest_exit_code.txt
+            podman run --rm --privileged --group-add keep-groups -v ./critest_exit_code.txt:/tmp/critest_exit_code.txt cri-in-userns-systemd
+            exit_code=`cat ./critest_exit_code.txt`
+            echo "exit_code:"$exit_code
+            if [ "$exit_code" -gt 0 ]; then
+              exit 1
+            else
+              exit 0
+            fi
+          else
+            podman run --rm --privileged cri-in-userns
+          fi
+
   test:
     name: Test on ${{ matrix.os }} (go ${{ matrix.go-version }})
     strategy:
